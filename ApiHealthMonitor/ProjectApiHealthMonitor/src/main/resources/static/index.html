@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>API Health Monitor</title>
+  <style>
+    :root{
+      --bg:#0f172a; --bg2:#0b1220; --card:#111827; --text:#e5e7eb; --muted:#9ca3af;
+      --green:#22c55e; --red:#ef4444; --yellow:#f59e0b; --blue:#2563eb; --border:#1f2937;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Arial;
+      background: radial-gradient(1100px 700px at 50% -50%, #1f2937 0%, var(--bg) 50%, var(--bg2) 100%);
+      color:var(--text); display:flex; flex-direction:column;
+    }
+
+    /* Header: centered title, no chips/subtext */
+    header{ max-width:1000px; margin:0 auto; padding:24px 16px; text-align:center; }
+    header h1{ margin:0; font-size:32px; letter-spacing:.3px; }
+
+    main{ max-width:1000px; width:100%; margin:0 auto; padding:8px 16px 32px; display:grid; gap:16px; grid-template-columns:1fr; }
+
+    .card{ background:linear-gradient(180deg,#0c1322,var(--card)); border:1px solid var(--border);
+      border-radius:14px; padding:16px; box-shadow:0 10px 40px rgba(0,0,0,.25); }
+    .card h2{ margin:0 0 10px 0; font-size:20px; }
+
+    .status-row{ display:flex; align-items:center; gap:10px; margin:8px 0 14px; }
+    .dot{ width:10px; height:10px; border-radius:50%; display:inline-block; background:var(--yellow);
+          box-shadow:0 0 0 4px rgba(245,158,11,.15); transition:all .2s; }
+    .dot.up{ background:var(--green); box-shadow:0 0 0 4px rgba(34,197,94,.15); }
+    .dot.down{ background:var(--red); box-shadow:0 0 0 4px rgba(239,68,68,.15); }
+
+    .row{ display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    .kv { display:grid; grid-template-columns:max-content 1fr; gap:4px 12px; align-items:center; }
+    .kv .k{ color:var(--muted) }
+    .kv .v code{ background:#0b1220; border:1px solid var(--border); padding:4px 6px; border-radius:8px; }
+
+    .actions{ display:flex; flex-wrap:wrap; gap:10px; margin:10px 0; }
+    button.btn{
+      appearance:none; border:none; background:var(--blue); color:#fff;
+      padding:10px 14px; border-radius:10px; font-weight:600; cursor:pointer;
+    }
+    .btn.alt{ background:#374151; }
+    .btn.outline{ background:transparent; border:1px solid #39445a; color:#e5e7eb; }
+
+    pre#output{
+      margin:0; background:#0b1220; border:1px solid var(--border);
+      border-radius:10px; padding:12px; min-height:220px; color:#cbd5e1; overflow:auto; white-space:pre-wrap;
+    }
+    .tiny{ font-size:12px; color:var(--muted); }
+    footer{ color:var(--muted); text-align:center; padding:18px 16px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>API Health Monitor</h1>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Status Panel</h2>
+      <p class="tiny">Use the buttons to load health endpoints; the response JSON appears below.</p>
+
+      <div class="status-row">
+        <span id="statusDot" class="dot" title="Unknown"></span>
+        <strong id="statusText">Status: UNKNOWN</strong>
+      </div>
+
+      <div class="kv" style="margin-bottom:10px">
+        <div class="k">Endpoint</div><div class="v"><code id="endpointLabel">GET /health</code></div>
+        <div class="k">Checked</div><div class="v"><span id="checkedAt" class="tiny">—</span></div>
+        <div class="k">Latency</div><div class="v"><span id="latency" class="tiny">—</span></div>
+      </div>
+
+      <div class="actions">
+        <button class="btn"        id="btnHealth"    data-path="/health">Check Health</button>
+        <button class="btn alt"    id="btnDetails"   data-path="/health/details">View Details</button>
+        <button class="btn outline" id="btnAct"      data-path="/actuator/health">Actuator Health</button>
+        <!-- Simulate DOWN (calls a bogus path so fetch fails) -->
+        <button class="btn outline" id="btnDown"     data-path="/__simulate_down__">Simulate DOWN</button>
+      </div>
+
+      <pre id="output">—</pre>
+      <p class="tiny">Tip: If /actuator/health returns 404, add Spring Boot Actuator in pom.xml or use /health endpoints above.</p>
+    </section>
+  </main>
+
+  <footer>
+    <small>© 2025 API Health Monitor</small>
+  </footer>
+
+  <script>
+    // For same-origin (served by Spring Boot): just use relative paths.
+    // If you ever serve this from another port (e.g., Live Server), set API_BASE = 'http://localhost:8090'
+    const API_BASE = ''; // '' = current origin. Use 'http://localhost:8090' when needed.
+
+    const $ = id => document.getElementById(id);
+
+    const statusDot   = $('statusDot');
+    const statusText  = $('statusText');
+    const endpointLbl = $('endpointLabel');
+    const output      = $('output');
+    const checkedAt   = $('checkedAt');
+    const latencyEl   = $('latency');
+
+    function setStatus(text, state) {
+      statusText.textContent = 'Status: ' + text;
+      statusDot.classList.remove('up', 'down');
+      if (state === 'up')   statusDot.classList.add('up');
+      if (state === 'down') statusDot.classList.add('down');
+    }
+
+    async function loadEndpoint(path) {
+      endpointLbl.textContent = 'GET ' + path;
+      setStatus('CHECKING…', '');
+      output.textContent = 'Loading ' + path + ' ...';
+
+      const started = performance.now();
+      try {
+        const res = await fetch(API_BASE + path, { cache: 'no-store' });
+        const elapsed = Math.round(performance.now() - started);
+        latencyEl.textContent = elapsed + ' ms';
+        checkedAt.textContent = new Date().toLocaleString();
+
+        // If HTTP status not OK, treat as DOWN
+        if (!res.ok) {
+          setStatus('DOWN', 'down');
+          const text = await res.text();
+          output.textContent = `HTTP ${res.status} ${res.statusText}\n\n` + text;
+          return;
+        }
+
+        const text = await res.text();
+        let json;
+        try { json = JSON.parse(text); } catch { json = { raw: text }; }
+
+        const statusVal = (json && (json.status || json.state)) || (/UP/i.test(text) ? 'UP' : 'UNKNOWN');
+        setStatus(statusVal, /UP|OK/i.test(statusVal) ? 'up' : 'down');
+
+        output.textContent = JSON.stringify(json, null, 2);
+      } catch (err) {
+        // Network error (e.g., server down, DNS, CORS) → mark DOWN
+        const elapsed = Math.round(performance.now() - started);
+        latencyEl.textContent = elapsed + ' ms';
+        checkedAt.textContent = new Date().toLocaleString();
+        setStatus('DOWN', 'down');
+        output.textContent = String(err);
+      }
+    }
+
+    // Wire buttons
+    document.querySelectorAll('button[data-path]').forEach(btn => {
+      btn.addEventListener('click', () => loadEndpoint(btn.dataset.path));
+    });
+
+    // First check on page load
+    loadEndpoint('/health');
+  </script>
+</body>
+</html>
